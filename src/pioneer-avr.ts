@@ -3,62 +3,25 @@
 */
 
 import {Logger} from "homebridge";
+import EventEmitter from "events";
 
 const request = require('request');
 const TelnetAvr = require('./telnet-avr');
 const Input = require('./input');
 
-// Reference fot input id -> Characteristic.InputSourceType
-const inputToType = {
-  '00': 0, // PHONO -> Characteristic.InputSourceType.OTHER
-  '01': 0, // CD -> Characteristic.InputSourceType.OTHER
-  '02': 2, // TUNER -> Characteristic.InputSourceType.TUNER
-  '03': 0, // TAPE -> Characteristic.InputSourceType.OTHER
-  '04': 0, // DVD -> Characteristic.InputSourceType.OTHER
-  '05': 3, // TV -> Characteristic.InputSourceType.HDMI
-  '06': 3, // CBL/SAT -> Characteristic.InputSourceType.HDMI
-  '10': 4, // VIDEO -> Characteristic.InputSourceType.COMPOSITE_VIDEO
-  '12': 0, // MULTI CH IN -> Characteristic.InputSourceType.OTHER
-  '13': 0, // USB-DAC -> Characteristic.InputSourceType.OTHER
-  '14': 6, // VIDEOS2 -> Characteristic.InputSourceType.COMPONENT_VIDEO
-  '15': 3, // DVR/BDR -> Characteristic.InputSourceType.HDMI
-  '17': 9, // USB/iPod -> Characteristic.InputSourceType.USB
-  '18': 2, // XM RADIO -> Characteristic.InputSourceType.TUNER
-  '19': 3, // HDMI1 -> Characteristic.InputSourceType.HDMI
-  '20': 3, // HDMI2 -> Characteristic.InputSourceType.HDMI
-  '21': 3, // HDMI3 -> Characteristic.InputSourceType.HDMI
-  '22': 3, // HDMI4 -> Characteristic.InputSourceType.HDMI
-  '23': 3, // HDMI5 -> Characteristic.InputSourceType.HDMI
-  '24': 3, // HDMI6 -> Characteristic.InputSourceType.HDMI
-  '25': 3, // BD -> Characteristic.InputSourceType.HDMI
-  '26': 10, // MEDIA GALLERY -> Characteristic.InputSourceType.APPLICATION
-  '27': 0, // SIRIUS -> Characteristic.InputSourceType.OTHER
-  '31': 3, // HDMI CYCLE -> Characteristic.InputSourceType.HDMI
-  '33': 0, // ADAPTER -> Characteristic.InputSourceType.OTHER
-  '34': 3, // HDMI7-> Characteristic.InputSourceType.HDMI
-  '35': 3, // HDMI8-> Characteristic.InputSourceType.HDMI
-  '38': 2, // NETRADIO -> Characteristic.InputSourceType.TUNER
-  '40': 0, // SIRIUS -> Characteristic.InputSourceType.OTHER
-  '41': 0, // PANDORA -> Characteristic.InputSourceType.OTHER
-  '44': 0, // MEDIA SERVER -> Characteristic.InputSourceType.OTHER
-  '45': 0, // FAVORITE -> Characteristic.InputSourceType.OTHER
-  '48': 0, // MHL -> Characteristic.InputSourceType.OTHER
-  '49': 0, // GAME -> Characteristic.InputSourceType.OTHER
-  '57': 0 // SPOTIFY -> Characteristic.InputSourceType.OTHER
-};
-
-class PioneerAvr {
+class PioneerAvr extends EventEmitter {
 
   private readonly log: Logger;
   private readonly host: String;
   private readonly port: Number;
   private readonly state: State;
   private readonly inputs: Map<string, Input> = new Map<string, Input>();
-  private readonly telnet: typeof TelnetAvr;
+  private readonly telnetAvr: typeof TelnetAvr;
   private initCount: number = 0;
   private isReady: Boolean = false;
 
   constructor(log: Logger, host: String, port: Number) {
+    super();
     const me = this;
     this.log = log;
     this.host = host;
@@ -83,71 +46,71 @@ class PioneerAvr {
         });
     */
     // Communication Initialization
-    this.telnet = new TelnetAvr(this.log, this.host, this.port);
+    this.telnetAvr = new TelnetAvr(this.log, this.host, this.port);
+    this.registerDataHandler();
   }
 
-  loadInputs(callback: any) {
+  requestInputDefinitions(): void {
     // Queue and send all inputs discovery commands
-    this.log.debug('Discovering inputs');
-    for (var key in inputToType) {
+    this.log.debug('Request input definitions');
+    for (var key in Input.inputToType) {
       this.log.debug('Trying Input key: %s', key);
-      this.sendCommand(`?RGB${key}`, callback)
+      this.sendCommand(`?RGB${key}`)
     }
   }
 
-// Send command and process return
-
-  async sendCommand(command: string, callback: any) {
-    // Main method to send a command to AVR
-    this.log.debug('Send command : %s', command);
-    this.telnet.sendMessage(command, (data: string) => {
-      this.log.debug('Receive data : %s', data);
+  private registerDataHandler(): void {
+    const self = this;
+    const inputLength = Object.keys(Input.inputToType).length;
+    self.telnetAvr.on('data', (data: string) => {
+      self.log.debug('Receive data : %s', data);
       // Data returned for input queries
       if (data.startsWith('RGB')) {
         var tmpInput = new Input(
             data.substr(3,2),
             data.substr(6).trim(),
             0); // FIXME type
-        this.inputs.set(tmpInput.id, tmpInput);
+        self.inputs.set(tmpInput.id, tmpInput);
         if (!this.isReady) {
-          this.initCount++;
-          this.log.debug('Input [%s] discovered (id: %s, type: %s). InitCount=%s/%s',
+          self.initCount++;
+          self.log.debug('Input [%s] discovered (id: %s, type: %s). InitCount=%s/%s',
               tmpInput.name,
               tmpInput.id,
               tmpInput.type,
-              this.initCount,
-              Object.keys(inputToType).length
+              self.initCount,
+              inputLength
           );
-          if (this.initCount === Object.keys(inputToType).length) this.isReady = true;
+          if (self.initCount === inputLength) {
+            self.isReady = true;
+          }
         }
-        callback(this.initCount, tmpInput);
+        self.emit('inputDefinition', self.initCount, tmpInput);
       }
 
       // E06 is returned when input not exists
       if (data.startsWith('E06')) {
-        this.log.debug('Receive E06 error');
+        self.log.debug('Receive E06 error');
         if (!this.isReady) {
-          this.initCount++;
-          this.log.debug('Input does not exists. InitCount=%s/%s',
-              this.initCount,
-              Object.keys(inputToType).length
+          self.initCount++;
+          self.log.debug('Input does not exists. InitCount=%s/%s',
+              self.initCount,
+              inputLength
           );
-          if (this.initCount === Object.keys(inputToType).length) this.isReady = true;
+          if (self.initCount === inputLength) {
+            self.isReady = true;
+          }
         }
       }
-    }, (error: any) => {
-      this.log.error('Error: ' + error);
     });
-
-    /*
-    return this.telnet.sendMessage(command)
-      .then((data: any) => {
-
-      }).catch((error: any) => {
-        this.log.error('Error: ' + error)
-      });
-     */
   }
+
+  // Send command and process return
+
+  sendCommand(command: string) {
+    this.log.debug('Send command : %s', command);
+    this.telnetAvr.sendMessage(command);
+  }
+
 }
 
 class State {

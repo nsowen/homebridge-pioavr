@@ -57,18 +57,21 @@ class PioAVRAccessory implements AccessoryPlugin {
   private readonly informationService: Service;
   private readonly tvSpeakerService: Service;
   private readonly avr: typeof PioneerAvr;
-  private readonly inputServices: Map<string, InputSource> = new Map<string, InputSource>();
+  private inputServices: { [key: string]: InputSource } = {};
 
   constructor(log: Logging, config: AccessoryConfig, api: API) {
+    const self = this;
     this.log = log;
     this.name = config.name;
 
-    this.avr = new PioneerAvr(this.log, "vsx-921", 23);
     this.tvService = this.createTvService();
     this.tvSpeakerService = this.createTvSpeakerService();
     this.informationService = this.createInformationService();
     this.createInputServices();
 
+    // create connection and register listeners
+    this.avr = new PioneerAvr(this.log, "vsx-921", 23);
+    this.avr.on('inputDefinition', (index: number, input: Input) => self.modifyInputSourceService(index, input));
     this.startInputDiscovery();
 
   }
@@ -110,16 +113,16 @@ class PioAVRAccessory implements AccessoryPlugin {
   }
 
   createInputServices(): void {
-    for (let key in this.avr.inputToType) {
-      this.inputServices.set(key, this.createInputSourceService(key));
-      this.log.debug("set %s = %s", key, this.inputServices.get(key));
+    for (let key in Input.inputToType) {
+      this.inputServices[key] = this.createInputSourceService(key);
+      this.log.debug("set %s = %s", key, this.inputServices[key]);
     }
     this.log.debug("map created: ", this.inputServices);
   }
 
   startInputDiscovery(): void {
     this.log.info('Discovering inputs: ', this.inputServices);
-    this.avr.loadInputs(this.modifyInputSourceService.bind(this));
+    this.avr.requestInputDefinitions();
   }
 
   modifyInputSourceService(index: number, input: Input) {
@@ -131,7 +134,9 @@ class PioAVRAccessory implements AccessoryPlugin {
         input.type
     );
 
-    const inputSource = this.inputServices.get(input.id);
+    this.log.debug('map: ' + this.inputServices);
+
+    const inputSource = this.inputServices[input.id];
     this.log.debug("Got inputSource: %s", inputSource);
     inputSource?.setCharacteristic(hap.Characteristic.IsConfigured, hap.Characteristic.IsConfigured.CONFIGURED)
     .setCharacteristic(hap.Characteristic.ConfiguredName, input.name) // Name in home app
@@ -146,7 +151,7 @@ class PioAVRAccessory implements AccessoryPlugin {
     .setCharacteristic(hap.Characteristic.Identifier, key.toString())
     .setCharacteristic(hap.Characteristic.ConfiguredName, 'Input' + key) // Name in home app
     .setCharacteristic(hap.Characteristic.IsConfigured, hap.Characteristic.IsConfigured.NOT_CONFIGURED)
-    .setCharacteristic(hap.Characteristic.InputSourceType, this.avr.inputs[key].type)
+    .setCharacteristic(hap.Characteristic.InputSourceType, 0)
     .setCharacteristic(hap.Characteristic.CurrentVisibilityState, hap.Characteristic.CurrentVisibilityState.HIDDEN) // Show in input list
     .setCharacteristic(hap.Characteristic.TargetVisibilityState, hap.Characteristic.CurrentVisibilityState.HIDDEN); // Enable show selection
     input
@@ -175,7 +180,7 @@ class PioAVRAccessory implements AccessoryPlugin {
       this.informationService,
       this.tvService,
       this.tvSpeakerService
-    ].concat(Array.from(this.inputServices.values()));
+    ].concat(Object.values(this.inputServices));
   }
 
 }

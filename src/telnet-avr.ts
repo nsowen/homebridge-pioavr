@@ -1,6 +1,7 @@
 'use strict';
 
-import {Logger} from "homebridge";
+import {Logger} from "homebridge/lib/logger";
+import EventEmitter from "events";
 
 const { Telnet } = require('telnet-client')
 const ReadWriteLock = require('rwlock');
@@ -8,7 +9,11 @@ const ReadWriteLock = require('rwlock');
 const PORT = 23;
 const HOST = '127.0.0.1';
 
-class TelnetAvr {
+const sendOpts = {
+  negotiationMandatory: false
+};
+
+class TelnetAvr extends EventEmitter {
 
   private readonly host: string;
   private readonly port: number;
@@ -16,20 +21,19 @@ class TelnetAvr {
   private keepAliveEnabled: boolean = true;
   private readonly telnet: typeof Telnet;
   private connected: boolean = false;
-  private initialized: boolean = true;
-  private releaseLockCallback: any;
+  private initialized: boolean = false;
   private logger: Logger;
 
   constructor(logger: Logger, host: string, port: number) {
+    super();
     this.logger = logger;
     this.host = host || HOST;
     this.port = port || PORT;
     this.lock = new ReadWriteLock();
     this.telnet = new Telnet();
-    this.connectTelnet();
   }
 
-  connectTelnet() {
+  public connect(): void {
     this.lock.writeLock((releaseLockCallback: any) => {
       const self = this;
 
@@ -40,13 +44,20 @@ class TelnetAvr {
       if (!this.initialized) {
         this.telnet.on('timeout', () => {
           self.logger.debug(`Connection timeout for ${this.host}:${this.port}`);
+          this.emit('timeout', this.host, this.port);
         })
         this.telnet.on('close', () => {
           self.logger.debug(`Connection closed for  ${this.host}:${this.port}`);
           self.connected = false;
+          this.emit('disconnected', this.host, this.port);
         })
-        this.telnet.on('data', (data: any) => {
+        this.telnet.on('data', (d: any) => {
+          let data = d
+          .toString()
+          .replace('\n', '')
+          .replace('\r', '');
           self.logger.debug(`Connection data from  ${this.host}:${this.port}: ${data}`);
+          this.emit('data', data);
         })
         this.initialized = true;
       }
@@ -55,6 +66,7 @@ class TelnetAvr {
       this.telnet.once('connect', () => {
         self.connected = true;
         releaseLockCallback();
+        this.emit('connected', self.host, self.port);
         this.triggerKeepAlive();
       });
       this.telnet.connect({
@@ -74,45 +86,20 @@ class TelnetAvr {
       if (!self.keepAliveEnabled) {
         return;
       }
-      self.write('').then((data: string) => {
-        this.logger.debug('got keepalive response: ' + data);
+      self.telnet.send('', sendOpts)
+      .then((data: any) => {
+        self.emit('keepalive', self.host, self.port);
         self.triggerKeepAlive(); // retrigger
       });
     }, 3000);
   }
 
-  async write(message: string) {
-    const self = this;
-    return new Promise<string>((resolve, reject) => {
-      self.lock.writeLock((release: any) => {
-        this.logger.debug('got lock, sending <' + message + '>');
-        self.telnet.send(message, {
-          ors: '\r\n',
-          timeout: 0
-        }, () => {
-          console.log('done sending')
-          self.telnet.nextData().then((raw: any) => {
-            console.log('got data: ' + raw);
-            const data = raw.toString()
-            .replace('\n', '')
-            .replace('\r', '');
-            self.logger.debug('got data: ' + data);
-            release();
-            // this.logger.debug('released lock and resolve');
-            resolve(data);
-          });
-        });
-      })
-    });
-  }
-
-  async sendMessage(message: string, callback: any, callbackError: any) {
-    this.logger.debug('in method: ' + message);
-    // await self.write(''); // sent empty and wait
-    // require('deasync').sleep(100);
-    const response = await this.write(message);
-    this.logger.debug("got promise: " + response);
-    callback(response);
+  sendMessage(message: string) {
+    this.connect();
+    this.logger.debug('Sending: ' + message);
+    this.telnet.send('', sendOpts);
+    require('deasync').sleep(100);
+    return this.telnet.send(message, sendOpts);
   }
 
 /*
@@ -165,18 +152,14 @@ class TelnetAvr {
 }
 
 /*
-var test = new TelnetAvr("192.168.178.28", 23);
+Logger.setDebugEnabled(true);
+var test = new TelnetAvr(new Logger("test"), "192.168.178.28", 23)
+  .on('data', (data: any) => {
+    console.log('hello: ' + data);
+  }).on('connected', () => console.log('connected'));
 
-for (var i=1; i<9; i++) {
-  test.sendMessage("?RGB0" + i)
-  .then(value => {
-    this.logger.debug('got callback: ' + value);
-  }).catch(error => {
-    this.logger.debug('got error: ' + error);
-  });
-}
-
-this.logger.debug('Do something else');
+test.sendMessage('?RGB10');
  */
+
 
 module.exports = TelnetAvr;
