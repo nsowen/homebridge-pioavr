@@ -3,14 +3,12 @@
 import {Logger} from "homebridge/lib/logger";
 import EventEmitter from "events";
 
-const { Telnet } = require('telnet-client')
+const {Telnet} = require('telnet-client')
 const ReadWriteLock = require('rwlock');
 
-const PORT = 23;
-const HOST = '127.0.0.1';
-
 const sendOpts = {
-  negotiationMandatory: false
+  negotiationMandatory: false,
+  shellPrompt: null
 };
 
 class TelnetAvr extends EventEmitter {
@@ -18,148 +16,133 @@ class TelnetAvr extends EventEmitter {
   private readonly host: string;
   private readonly port: number;
   private readonly lock: typeof ReadWriteLock;
-  private keepAliveEnabled: boolean = true;
   private readonly telnet: typeof Telnet;
   private connected: boolean = false;
   private initialized: boolean = false;
   private logger: Logger;
+  private queue: string[] = [];
 
   constructor(logger: Logger, host: string, port: number) {
     super();
     this.logger = logger;
-    this.host = host || HOST;
-    this.port = port || PORT;
+    this.host = host;
+    this.port = port;
     this.lock = new ReadWriteLock();
     this.telnet = new Telnet();
   }
 
-  public connect(): void {
+  public async disconnect(): Promise<void> {
+    if (!this.telnet || !this.connected) {
+      return Promise.resolve();
+    }
     this.lock.writeLock((releaseLockCallback: any) => {
-      const self = this;
+      return this.telnet.end()
+        .finally(() => releaseLockCallback());
+    });
+  }
 
-      if (this.connected) {
-        return;
-      }
+  public async connect(): Promise<void> {
+    return new Promise<void>((resolve: any, reject: any) => {
+      this.lock.writeLock((releaseLockCallback: any) => {
+        const self = this;
 
-      if (!this.initialized) {
-        this.telnet.on('timeout', () => {
-          self.logger.debug(`Connection timeout for ${this.host}:${this.port}`);
-          this.emit('timeout', this.host, this.port);
-        })
-        this.telnet.on('close', () => {
-          self.logger.debug(`Connection closed for  ${this.host}:${this.port}`);
-          self.connected = false;
-          this.emit('disconnected', this.host, this.port);
-        })
-        this.telnet.on('data', (d: any) => {
-          let data = d
-          .toString()
-          .replace('\n', '')
-          .replace('\r', '');
-          self.logger.debug(`Connection data from  ${this.host}:${this.port}: ${data}`);
-          this.emit('data', data);
-        })
-        this.initialized = true;
-      }
+        if (this.connected) {
+          releaseLockCallback();
+          resolve();
+          return;
+        }
 
-      this.logger.debug(`Connecting to  ${self.host}:${self.port}`);
-      this.telnet.once('connect', () => {
-        self.connected = true;
-        releaseLockCallback();
-        this.emit('connected', self.host, self.port);
-        this.triggerKeepAlive();
-      });
-      this.telnet.connect({
+        if (!this.initialized) {
+
+          this.telnet.on('timeout', () => {
+            self.logger.debug(`Connection timeout for ${this.host}:${this.port}`);
+            this.emit('timeout', this.host, this.port);
+          })
+
+          this.telnet.on('error', (err: any) => {
+            self.logger.warn(`Connection error for  ${this.host}:${this.port}: ${err}`);
+          });
+
+          this.telnet.on('close', () => {
+            self.logger.debug(`Connection closed for  ${this.host}:${this.port}`);
+            self.connected = false;
+            this.emit('disconnected', this.host, this.port);
+          })
+
+          this.telnet.on('end', () => {
+            self.logger.debug(`Connection ended for  ${this.host}:${this.port}`);
+            self.connected = false;
+            this.emit('disconnected', this.host, this.port);
+          })
+
+          this.telnet.on('data', (d: any) => {
+            let data = d
+            .toString()
+            .split('\r\n')
+            .map((value: string) => value.replace(/[\r\n]/g, '').trim())
+            .filter((value: string) => value && value.length > 0);
+            if (data) {
+              self.logger.debug(`Connection data from  ${this.host}:${this.port}: ${data}`);
+              data.forEach((line: string) => this.emit('data', line))
+            }
+          })
+
+          this.initialized = true;
+        }
+
+        // connect to endpoint and hook in with once listener
+        this.logger.debug(`Connecting to  ${self.host}:${self.port}`);
+        this.telnet.once('connect', () => {
+          this.logger.debug(`Connected to  ${self.host}:${self.port}`);
+          self.connected = true;
+          this.emit('connected', self.host, self.port);
+          this.queueMessage('');
+          // this.triggerKeepAlive();
+          releaseLockCallback();
+          resolve();
+        });
+        this.telnet.connect({
           port: self.port,
           host: self.host,
           negotiationMandatory: false,
-          timeout: 0,
           irs: '\r\n',
-          ors: '\r\n'
-      });
-    })
-  }
-
-  triggerKeepAlive() {
-    const self = this;
-    setTimeout(() => {
-      if (!self.keepAliveEnabled) {
-        return;
-      }
-      self.telnet.send('', sendOpts)
-      .then((data: any) => {
-        self.emit('keepalive', self.host, self.port);
-        self.triggerKeepAlive(); // retrigger
-      });
-    }, 3000);
-  }
-
-  sendMessage(message: string) {
-    this.connect();
-    this.logger.debug('Sending: ' + message);
-    this.telnet.send('', sendOpts);
-    require('deasync').sleep(100);
-    return this.telnet.send(message, sendOpts);
-  }
-
-/*
-  async sendMessage(message: string): Promise<string> {
-    var me = this;
-    return new Promise(function(resolve, reject) {
-      me.lock.writeLock(function (release: any) {
-
-        const socket = net.Socket();
-        socket.setTimeout(2000, () => {
-          socket.destroy();
-        });
-
-        socket.once('connect', () => {
-          socket.setTimeout(0);
-        });
-
-        socket.connect(me.port, me.host, () => {
-          socket.write(message + '\r');
-          deasync.sleep(100);
-          socket.write(message + '\r');
-          if (!message.startsWith('?')) {
-            socket.end();
-            resolve(message + ':SENT');
-          }
-        });
-
-        socket.on('close', () => {
-          deasync.sleep(100);
-          release();
-        });
-
-        socket.on('data', (d: any) => {
-          let data = d
-          .toString()
-          .replace('\n', '')
-          .replace('\r', '');
-          this.logger.debug('resolving: ' + data);
-          resolve(data);
-          socket.end();
-        });
-
-        socket.on('error', (err: any) => {
-          reject(err);
+          ors: '\r',
+          timeout: 800,
+        }).catch((error: any) => {
+          // retry in 10 secs
+          releaseLockCallback();
+          setTimeout(() => this.connect(), 10000);
         });
       });
     });
   }
-   */
+
+  queueMessage(message: string): void {
+    if (message) {
+      this.queue.push(message);
+    }
+    if (this.queue.length > 0) {
+      this.drain();
+    }
+  }
+
+  private drain(): void {
+    // early return if queue is empty
+    if (this.queue.length == 0 || !this.connected) {
+      return;
+    }
+
+    // at least one message to send
+    let queuedMessage = this.queue.shift();
+    this.logger.debug('Sending via telnet: ' + queuedMessage);
+    this.telnet.send(queuedMessage, sendOpts)
+    .catch((sendErr: any) => this.logger.warn('Sending: ' + queuedMessage + ' failed: ' + sendErr));
+
+    // repeat until empty, but wait 100ms first
+    if (this.queue.length > 0) {
+      setTimeout(() => this.drain(), 100);
+    }
+  }
 }
-
-/*
-Logger.setDebugEnabled(true);
-var test = new TelnetAvr(new Logger("test"), "192.168.178.28", 23)
-  .on('data', (data: any) => {
-    console.log('hello: ' + data);
-  }).on('connected', () => console.log('connected'));
-
-test.sendMessage('?RGB10');
- */
-
 
 module.exports = TelnetAvr;

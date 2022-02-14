@@ -41,7 +41,7 @@ class Input {
   };
 
   private readonly _id: string;
-  private readonly _name: string;
+  private _name: string;
   private readonly _type: number;
 
   constructor(id: string, name: string, type: number) {
@@ -56,6 +56,9 @@ class Input {
 
   get name(): string {
     return this._name;
+  }
+  set name(name: string) {
+    this._name = name;
   }
 
   get type(): number {
